@@ -248,7 +248,7 @@ const PAN = M.panel;
 box(4, 745 - 130, 600, PAN, -383, 130 + (745 - 130) / 2, 0, gGuard); box(4, 400, 600, PAN, -383, 1300, 0, gGuard);
 box(4, 355, 190, PAN, -383, 922.5, -205, gGuard); box(4, 355, 190, PAN, -383, 922.5, 205, gGuard);
 box(4, 1370, 600, M.pc, 383, 815, 0, gGuard).userData.glass = 1; // right PC window
-box(760, 1370, 4, PAN, 0, 815, -303, gGuard); box(764, 4, 604, M.pc, 0, 1503, 0, gGuard).userData.glass = 1; // back + roof (PC)
+box(760, 1370, 4, M.pc, 0, 815, -303, gGuard).userData.glass = 1; box(764, 4, 604, M.pc, 0, 1503, 0, gGuard).userData.glass = 1; // back (PC, transparent like front) + roof (PC)
 // window frame strips on the right
 for (const y of [132, 1498]) box(6, 6, 600, M.alu, 386, y, 0, gGuard);
 // lower front panel with window (cabinet)
