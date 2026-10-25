@@ -35,7 +35,7 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure
 const scene = new THREE.Scene();
 // Fusion-360-like studio backdrop: light grey (default) or dark graphite
 let BG = (() => { const q = QS.get('bg'); if (q === 'dark' || q === 'light') { localStorage.setItem('dbc_bg', q); return q; } return localStorage.getItem('dbc_bg') || 'dark'; })();
-const THEMES = { light: { top: '#f4f5f7', bot: '#c3c7cd', fog: 0xd2d5da, base: '#d9dbdf', minor: '#c6c9ce', major: '#a9aeb5' }, dark: { top: '#30343a', bot: '#0a0b0d', fog: 0x16181b, base: '#1e2024', minor: '#282b30', major: '#3a3e45' } };
+const THEMES = { light: { top: '#f4f5f7', bot: '#c3c7cd', fog: 0xd2d5da, base: '#d9dbdf', minor: '#c6c9ce', major: '#a9aeb5' }, dark: { top: '#1a2430', bot: '#05070A', fog: 0x0B1016, base: '#1e2024', minor: '#282b30', major: '#3a3e45' } };
 function bgTex(T) { const c = document.createElement('canvas'); c.width = 4; c.height = 512; const x = c.getContext('2d'); const g = x.createLinearGradient(0, 0, 0, 512); g.addColorStop(0, T.top); g.addColorStop(1, T.bot); x.fillStyle = g; x.fillRect(0, 0, 4, 512); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; }
 scene.fog = new THREE.Fog(0xd2d5da, 6000, 14000);
 const pmrem = new THREE.PMREMGenerator(renderer); scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
