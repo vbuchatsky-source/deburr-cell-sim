@@ -164,6 +164,54 @@ function linRailX(len, x, y, z, p, face = 'z') { const m = box(len, 15, 15, M.st
 const parts = {}, partOrder = [];
 function part(id, name, desc, dir, anchor, opt = {}) { const g = new THREE.Group(); g.userData.part = id; scene.add(g);
   parts[id] = { id, name, desc, g, dir: new THREE.Vector3(...dir), anchor: new THREE.Vector3(...anchor), no: partOrder.length + 1, shell: !!opt.shell }; partOrder.push(id); return g; }
+// ================= modelling kit: bevelled extrusions, filleted lathes, CSG (three-bvh-csg) =================
+import { Brush, Evaluator, SUBTRACTION, ADDITION } from 'three-bvh-csg';
+const CSGE = new Evaluator(); CSGE.attributes = ['position', 'normal', 'uv']; CSGE.useGroups = false;
+const CSGC = new Map(); window.__CSG = { n: 0, ms: 0 };
+function prepG(g) { const c = g.index ? g.toNonIndexed() : g.clone(); for (const k of Object.keys(c.attributes)) if (!['position', 'normal', 'uv'].includes(k)) c.deleteAttribute(k);
+  if (!c.attributes.normal) c.computeVertexNormals(); if (!c.attributes.uv) c.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(c.attributes.position.count * 2), 2)); c.clearGroups(); return c; }
+// ops: [geometry, [x,y,z], [rx,ry,rz], 'sub'|'add']
+function csg(key, base, ops) { if (key && CSGC.has(key)) return CSGC.get(key); const t0 = performance.now();
+  let a = new Brush(prepG(base)); a.updateMatrixWorld();
+  for (const [g, p, r, op] of ops) { const b = new Brush(prepG(g)); if (p) b.position.set(...p); if (r) b.rotation.set(...r); b.updateMatrixWorld(); a = CSGE.evaluate(a, b, op === 'add' ? ADDITION : SUBTRACTION); }
+  const out = a.geometry; out.userData.noEdge = 1; out.computeBoundingBox(); out.computeBoundingSphere(); __CSG.n++; __CSG.ms += performance.now() - t0; if (key) CSGC.set(key, out); return out; }
+function rrect(w, h, r, cx = 0, cy = 0) { const s = new THREE.Shape(), x = cx - w / 2, y = cy - h / 2; r = Math.max(.01, Math.min(r, w / 2 - .01, h / 2 - .01));
+  s.moveTo(x + r, y); s.lineTo(x + w - r, y); s.absarc(x + w - r, y + r, r, -Math.PI / 2, 0); s.lineTo(x + w, y + h - r); s.absarc(x + w - r, y + h - r, r, 0, Math.PI / 2);
+  s.lineTo(x + r, y + h); s.absarc(x + r, y + h - r, r, Math.PI / 2, Math.PI); s.lineTo(x, y + r); s.absarc(x + r, y + r, r, Math.PI, 1.5 * Math.PI); return s; }
+// polygon with per-corner fillet radius: pts [[x,y,f]]
+function fshape(pts, n = 6) { const s = new THREE.Shape(); const P = pts.map(p => new THREE.Vector2(p[0], p[1])); const out = [];
+  for (let i = 0; i < P.length; i++) { const f = pts[i][2] || 0, p = P[i]; if (!f) { out.push(p); continue; } const a = P[(i + P.length - 1) % P.length], b = P[(i + 1) % P.length];
+    const da = a.clone().sub(p), db = b.clone().sub(p); const fa = Math.min(f, da.length() * .45), fb = Math.min(f, db.length() * .45); const s0 = p.clone().addScaledVector(da.normalize(), fa), s1 = p.clone().addScaledVector(db.normalize(), fb);
+    for (let k = 0; k <= n; k++) { const t = k / n, u = 1 - t; out.push(new THREE.Vector2(u * u * s0.x + 2 * u * t * p.x + t * t * s1.x, u * u * s0.y + 2 * u * t * p.y + t * t * s1.y)); } }
+  s.setFromPoints(out); return s; }
+// bevelled extrusion that keeps the exact outline envelope; centred in z, thickness = depth
+function bext(shape, depth, b = 1.2, seg = 3, cs = 24) { b = Math.min(b, depth * .3); const g = new THREE.ExtrudeGeometry(shape, { depth: Math.max(.05, depth - 2 * b), bevelEnabled: b > 0, bevelThickness: b, bevelSize: b, bevelSegments: seg, curveSegments: cs });
+  g.computeBoundingBox(); const bb = g.boundingBox, sp = new THREE.Box2().setFromPoints(shape.getPoints(cs)); const c = new THREE.Vector3(); bb.getCenter(c); const sc = new THREE.Vector2(); sp.getCenter(sc);
+  g.translate(-c.x, -c.y, -c.z); g.scale((sp.max.x - sp.min.x) / (bb.max.x - bb.min.x), (sp.max.y - sp.min.y) / (bb.max.y - bb.min.y), 1); g.translate(sc.x, sc.y, 0); return g; }
+// filleted lathe profile: pts [[r,y,f]] (r ≥ 0), revolved about y
+function rlathe(pts, seg = 64) { const s = fshape(pts, 5); const v = s.getPoints().map(p => new THREE.Vector2(Math.max(0, p.x), p.y)); return new THREE.LatheGeometry(v, seg); }
+function rcylG(r, len, f, r2) { const rt = r2 ?? r; f = Math.min(f, r * .45, rt * .45, len * .45); return rlathe([[0, -len / 2], [r, -len / 2, f], [rt, len / 2, f], [0, len / 2]], r > 30 ? 96 : 64); }
+const orient = (g, ax) => { if (ax === 'x') g.rotateZ(-Math.PI / 2); else if (ax === 'z') g.rotateX(Math.PI / 2); else if (ax === '-y') g.rotateX(Math.PI); return g; };
+function put(g, mat, x, y, z, p, rx = 0, ry = 0, rz = 0) { const m = add(new THREE.Mesh(g, mat), p); m.position.set(x, y, z); m.rotation.set(rx, ry, rz); return m; }
+function rcyl(r, len, f, mat, axis, x, y, z, p, r2) { return put(orient(rcylG(r, len, f, r2), axis), mat, x, y, z, p); }
+// machined plate w×h (x,y), thickness d (z); counterbored holes [x,y,rHole,rCb,cbDepth] and pockets [x,y,w,h,r,depth] cut from the +z face
+const zc = (r, len, seg = 32) => new THREE.CylinderGeometry(r, r, len, seg).rotateX(Math.PI / 2);
+function mplateG(w, h, d, o = {}) { const key = 'mp' + JSON.stringify([w, h, d, o]); if (CSGC.has(key)) return CSGC.get(key); const r = o.r ?? Math.min(w, h) * .12, b = o.b ?? Math.min(1.5, d * .25);
+  const base = bext(rrect(w, h, r), d, b), ops = [];
+  for (const [x, y, rh, rc = 0, cd = 0] of o.holes || []) { ops.push([zc(rh, d + 4), [x, y, 0], null, 'sub']); if (rc) ops.push([zc(rc, cd + 2), [x, y, d / 2 - cd / 2 + 1], null, 'sub']); }
+  for (const [x, y, pw, ph, pr, pd] of o.pockets || []) ops.push([new THREE.ExtrudeGeometry(rrect(pw, ph, pr), { depth: pd + 2, bevelEnabled: false, curveSegments: 12 }), [x, y, d / 2 - pd], null, 'sub']);
+  for (const op of o.ops || []) ops.push(op);
+  const g = ops.length ? csg(key, base, ops) : base; CSGC.set(key, g); return g; }
+// orient a +z-faced plate so that face points along ax ('y','-y','x','-x','z','-z')
+function faceTo(g, ax) { g = g.clone(); if (ax === 'y') g.rotateX(-Math.PI / 2); else if (ax === '-y') g.rotateX(Math.PI / 2); else if (ax === 'x') g.rotateY(Math.PI / 2); else if (ax === '-x') g.rotateY(-Math.PI / 2); else if (ax === '-z') g.rotateY(Math.PI); return g; }
+function mplate(w, h, d, o, face, mat, x, y, z, p) { return put(faceTo(mplateG(w, h, d, o), face), mat, x, y, z, p); }
+// rounded block with CSG ops (cutter list in block-local coords)
+function mblock(key, w, h, d, r, ops, mat, x, y, z, p) { const g = csg('mb' + key, new RoundedBoxGeometry(w, h, d, 4, r), ops); return put(g, mat, x, y, z, p); }
+// UR-style joint end cap: satin graphite dome inside an orange ring (fits the r × t envelope)
+function capJ(r, t, axis, x, y, z, p, plain = 0) { const g = new THREE.Group(); p.add(g); g.position.set(x, y, z); if (axis === 'z') g.rotation.x = Math.PI / 2; else if (axis === 'x') g.rotation.z = -Math.PI / 2;
+  put(rlathe([[0, -t / 2], [r * .8, -t / 2], [r * .78, t / 2 - 1, 3], [r * .4, t / 2, 6], [0, t / 2]], 96), M.robot, 0, 0, 0, g);
+  if (!plain) put(rlathe([[r * .8, -t / 2], [r, -t / 2, 1.5], [r, t / 2, 1.5], [r * .8, t / 2, 1]], 96), M.robotJ, 0, 0, 0, g);
+  else put(rlathe([[r * .8, -t / 2], [r, -t / 2, 1.5], [r, t / 2, 1.5], [r * .8, t / 2, 1]], 96), M.robot, 0, 0, 0, g); return g; }
 
 // =====================================================================
 //  SCENE  (mm, Y up). Cell centre x=0,z=0. Front door at +z. Robot at -x.
@@ -175,8 +223,9 @@ const A = (o, ...ids) => { o.userData.allow = (o.userData.allow || []).concat(id
 const gFrame = part('frame', L('מסגרת פרופילי אלומיניום item 50×50', 'item 50×50 aluminium profile frame'), L('מסגרת מפרופילי אלומיניום מאולגן 10-50×50 (item 0.0.624.52) – 4 עמודים של 1500 מ"מ, קורות רוחב ואורך, זוויתנים יצוקים ופלטת עבודה SS304 בעובי 10 מ"מ. רגלי פילוס ואוזני מלגזה. הורחבה ל-760 מ"מ כדי שמנוע ציר X יישאר בתוך המעטפת.', 'Anodised aluminium 10-50×50 profiles (item 0.0.624.52) – four 1500 mm posts, cross beams, die-cast angle brackets and a 10 mm SS304 machine plate. Levelling feet and forklift lugs. Widened to 760 mm so the X motor stays inside the envelope.'), [0, 0, 0], [355, 1500, 275]);
 for (const x of [-355, 355]) for (const z of [-275, 275]) { prof(1430, 'y', x, 785, z, gFrame); cyl(22, 6, M.black, 'y', x, 57, z, gFrame); cyl(14, 22, M.steel, 'y', x, 43, z, gFrame); cyl(30, 10, M.rubber, 'y', x, 27, z, gFrame); box(50, 8, 50, M.dark, x, 64, z, gFrame); }
 for (const y of [95, 715, 1475]) { for (const z of [-275, 275]) prof(660, 'x', 0, y, z, gFrame); for (const x of [-355, 355]) prof(500, 'z', x, y, 0, gFrame); }
-// angle brackets (item 62523) under the x-rails at the posts
-{ for (const x of [-355, 355]) for (const z of [-275, 275]) for (const y of [715, 1475]) { if (y === 1475 && z < 0) continue; const sx = Math.sign(x); box(22, 4, 22, M.alu, x - sx * 36, y - 27, z, gFrame); box(4, 22, 22, M.alu, x - sx * 27, y - 36, z, gFrame); box(4, 4, 22, M.alu, x - sx * 30, y - 30, z, gFrame).rotation.z = Math.PI / 4; } }
+// angle brackets (item 62523) under the x-rails at the posts – cast, filleted, with counterbored slots
+const BRK = csg('brk', bext(fshape([[0, 0, 1], [-22, 0, 1.5], [-22, -4, 1], [-6, -4, 3], [-4, -6, 3], [-4, -22, 1], [0, -22, 1.5]]), 22, .8), [[new THREE.CylinderGeometry(3.3, 3.3, 12, 20), [-14, -2, 0], null, 'sub'], [new THREE.CylinderGeometry(3.3, 3.3, 12, 20).rotateZ(Math.PI / 2), [-2, -14, 0], null, 'sub']]);
+{ for (const x of [-355, 355]) for (const z of [-275, 275]) for (const y of [715, 1475]) { if (y === 1475 && z < 0) continue; const sx = Math.sign(x); put(BRK, M.alu, x - sx * 25, y - 25, z, gFrame, 0, sx > 0 ? 0 : Math.PI, 0); } }
 box(660, 10, 550, M.ss, 0, 745, 0, gFrame); // SS304 machine plate (item 10001)
 { const B = []; for (const x of [-310, -110, 110, 310]) for (const z of [-260, 260]) B.push([x, 750, z]); bolts(gFrame, B, .9); }
 // loading bridge outside the cell (shuttle overhang) + support leg
@@ -222,20 +271,20 @@ tube([[-402, 1500, -150], [-402, 1530, -120], [-402, 1520, -60]], 3, M.hose, gSh
 const gZ = part('zaxis', L('ציר Z – מסילות PTFE ובורג הנעה M12', 'Z axis – PTFE rails and M12 lead screw'), L('שתי מסילות PTFE (item 10002), בורג הנעה M12, מסבי BK/BF12 ומנוע צעד NEMA17 עם מצמד. השאטל נע בין עמדת הטעינה (מחוץ לתא), עמדת הבדיקה ועמדת העבודה – זהו "מיקום Z" של הכלי מתחת למברשות.', 'Two PTFE rails (item 10002), M12 lead screw, BK/BF12 bearings and a NEMA17 stepper with coupling. The shuttle moves between the loading station (outside the cell), the inspection station and the working station – the "Z positioning" of the tool under the brushes.'), [0, -.4, 1], [-150, 800, 60]);
 for (const z of [-45, 45]) box(735, 30, 16, M.ptfe, -207.5, 765, z, gZ);
 cyl(6, 715, M.ss, 'x', -212.5, 772, 0, gZ, 12);
-box(24, 40, 46, M.alu, -562, 770, 0, gZ); box(24, 40, 46, M.alu, 132, 770, 0, gZ); // BK/BF supports
+for (const x of [-562, 132]) mblock('bk', 24, 40, 46, 4, [[new THREE.CylinderGeometry(3.4, 3.4, 50, 24), [0, 0, 15], null, 'sub'], [new THREE.CylinderGeometry(3.4, 3.4, 50, 24), [0, 0, -15], null, 'sub'], [new THREE.CylinderGeometry(5.8, 5.8, 8, 24), [0, 20, 15], null, 'sub'], [new THREE.CylinderGeometry(5.8, 5.8, 8, 24), [0, 20, -15], null, 'sub'], [new THREE.BoxGeometry(30, 10, 4), [0, -16, 0], null, 'sub']], M.alu, x, 770, 0, gZ); // BK/BF supports (machined, counterbored)
 cyl(9, 26, M.steel, 'x', -562, 772, 0, gZ, 16); cyl(9, 26, M.steel, 'x', 132, 772, 0, gZ, 16);
 jawCoupling(gZ, 160, 772, 0, 10, 26).rotation.z = Math.PI / 2;
 const zMot = nema(gZ, 205, 772, 0, 'x', 42, 48, 'NEMA17', -1); // shaft toward -x
-box(8, 48, 50, M.alu, 177, 776, 0, gZ);
+mplate(50, 48, 8, { r: 6, b: 1, holes: [[0, -4, 11.5], [-15.5, 11.5, 1.7, 3, 1.5], [15.5, 11.5, 1.7, 3, 1.5], [-15.5, -19.5, 1.7, 3, 1.5], [15.5, -19.5, 1.7, 3, 1.5]] }, '-x', M.alu, 177, 776, 0, gZ);
 // limit switches (E47) at rail ends
 for (const x of [-575, 145]) { box(20, 20, 14, M.blue, x, 760, 70, gZ); }
 
 // ---------- 5. shuttle (moving) + chuck ----------
 const gSh = part('shuttle', L('שאטל: פלטת נשא ומנוע ראשי PCE 220M4', 'Shuttle: carrier plate and PCE 220M4 main motor'), L('פלטת SS304 המחליקה על מסילות ה-PTFE, נושאת את מנוע הסיבוב הראשי (גיר-מנוע AC 220M4) ואת הצ\'אק. אום פליז על הבורג. בשאטל נמצא גם חיישן הנוכחות IFM IGT205 לזיהוי כלי.', 'SS304 plate sliding on the PTFE rails, carrying the main rotation motor (220M4 AC gear-motor) and the chuck. Brass nut on the screw. It also carries the IFM IGT205 presence sensor.'), [0, 0, 1], [0, 840, 70]);
 gSh.userData.body = 1; A(gSh, 'zaxis'); // slides on the rails / screw through nut
-box(140, 15, 140, M.ss, 0, 787.5, 0, gSh);
+mplate(140, 140, 15, { r: 10, b: 1.5, holes: [[-58, -58, 3.4, 5.6, 3.5], [58, -58, 3.4, 5.6, 3.5], [-58, 58, 3.4, 5.6, 3.5], [58, 58, 3.4, 5.6, 3.5]], pockets: [[-58, 0, 12, 70, 5, 4], [58, 0, 12, 70, 5, 4]] }, 'y', M.ss, 0, 787.5, 0, gSh);
 box(40, 18, 26, M.brass, 0, 771, 0, gSh); // nut under plate (between rails)
-box(90, 75, 90, M.motor, 0, 832.5, 0, gSh); cyl(30, 88, M.motor, 'x', 89, 832, 0, gSh, 24); cyl(31, 6, M.alu, 'x', 136, 832, 0, gSh, 24); box(30, 20, 26, M.black, 80, 872, 0, gSh);
+mblock('gm', 90, 75, 90, 12, [...[0, 1, 2, 3, 4].map(k => [new THREE.BoxGeometry(6, 4, 80), [-45, -24 + k * 12, 0], null, 'sub']), ...[0, 1, 2, 3, 4].map(k => [new THREE.BoxGeometry(80, 4, 6), [0, -24 + k * 12, -45], null, 'sub'])], M.motor, 0, 832.5, 0, gSh); cyl(30, 88, M.motor, 'x', 89, 832, 0, gSh, 24); cyl(31, 6, M.alu, 'x', 136, 832, 0, gSh, 24); box(30, 20, 26, M.black, 80, 872, 0, gSh);
 for (let i = 0; i < 6; i++) cyl(31.5, 2, M.dark, 'x', 55 + i * 12, 832, 0, gSh, 24);
 plate(70, 28, (c, w, h) => { c.fillStyle = '#d9dde2'; c.fillRect(0, 0, w, h); c.fillStyle = '#123'; c.font = `bold ${h * .38}px Arial`; c.fillText('PCE 220M4', w * .06, h * .45); c.font = `${h * .24}px Arial`; c.fillText('i=1:20 · 140 rpm', w * .06, h * .82); }, 0, 836, 45.6, gSh);
 box(18, 14, 12, M.blue, -55, 801, 56, gSh); cyl(4, 30, M.steel, 'x', -49, 815, 56, gSh, 10); // IFM sensor
@@ -243,12 +292,17 @@ box(18, 14, 12, M.blue, -55, 801, 56, gSh); cyl(4, 30, M.steel, 'x', -49, 815, 5
 const gChuck = new THREE.Group(); gChuck.userData.part = 'chuck'; gChuck.position.set(0, C.CH_Y, 0); gSh.add(gChuck);
 parts.chuck = { id: 'chuck', name: L('צ\'אק 3 לסתות Lingman JAB-40', 'Lingman JAB-40 3-jaw chuck'), desc: L('צ\'אק פנאומטי 3 לסתות Ø84. כוח הידוק מחושב ~95N; עם μ=0.15 מתקבל גבול גלישה ≈0.77N בקצה – ומכאן מגבלת כוח המברשת שמוטמעת בסימולציה (הגנת Over-force). ירידת לחץ אוויר מזוהה ע"י מתג לחץ.', 'Pneumatic 3-jaw chuck Ø84. Computed clamping force ~95 N; with μ=0.15 the slip limit at the tool tip is ≈0.77 N – this limit is built into the simulator as the over-force protection. Loss of air pressure is detected by a pressure switch.'), g: gChuck, dir: new THREE.Vector3(0, 1.2, .6), anchor: new THREE.Vector3(0, 75, 0), no: partOrder.length + 1 }; partOrder.push('chuck');
 gChuck.userData.body = 1; A(gChuck, 'shuttle', 'tool');
-cyl(42, 64, M.steel, 'y', 0, 32, 0, gChuck, 40); cyl(44, 10, M.dark, 'y', 0, 5, 0, gChuck, 40); cyl(14, 4, M.dark, 'y', 0, 64, 0, gChuck, 24);
-{ const B = []; for (let i = 0; i < 6; i++) { const a = i / 6 * TAU + .5; B.push([Math.cos(a) * 34, 64, Math.sin(a) * 34]); } bolts(gChuck, B, .55); }
+put(csg('chuck', rlathe([[0, 0], [44, 0, 1.5], [44, 10, 1], [42, 10, 1], [42, 29, .6], [40.6, 30.5, .6], [40.6, 33.5, .6], [42, 35, .6], [42, 64, 3], [17, 64, 1], [15, 62, 1], [10, 62, 1], [10, 50], [0, 50]], 128),
+  [...[0, 1, 2].map(i => { const a = i / 3 * TAU; return [new THREE.BoxGeometry(44, 6, 12.6), [Math.cos(a) * 25, 62.4, -Math.sin(a) * 25], [0, a, 0], 'sub']; }),
+   ...[0, 1, 2].map(i => { const a = i / 3 * TAU + Math.PI / 3; return [new THREE.BoxGeometry(14, 7, 7), [Math.cos(a) * 42, 40, -Math.sin(a) * 42], [0, a, 0], 'sub']; }),
+   ...[0, 1, 2, 3, 4, 5].map(i => { const a = i / 6 * TAU + .5; return [new THREE.CylinderGeometry(4.2, 4.2, 6, 24), [Math.cos(a) * 34, 64, Math.sin(a) * 34], null, 'sub']; })]), M.steel, 0, 0, 0, gChuck);
+rcyl(44.2, 9.6, 1.5, M.dark, 'y', 0, 5, 0, gChuck);
+{ const B = []; for (let i = 0; i < 6; i++) { const a = i / 6 * TAU + .5; B.push([Math.cos(a) * 34, 61.4, Math.sin(a) * 34]); } bolts(gChuck, B, .55); }
 const jaws = []; for (let i = 0; i < 3; i++) { const a = i / 3 * TAU; const piv = new THREE.Group(); piv.rotation.y = -a; gChuck.add(piv); const j = grp(piv, 20, 0, 0, 'jaw'); A(j, 'tool', 'chuck');
-  box(20, 15, 12, M.steel, 10, 71.5, 0, j); box(26, 4, 10, M.dark, 13, 65.5, 0, j); jaws.push(j); }
+  put(bext(fshape([[0, 64, .6], [20, 64, .8], [20, 70.5, .8], [14, 70.5, 1], [14, 74.5, .8], [8, 74.5, 1], [8, 79, .8], [0, 79, .6]]), 12, .7), M.steel, 0, 0, 0, j);
+  for (let k = 0; k < 4; k++) box(1.2, .8, 11, M.dark, 1.5 + k * 1.6, 79.2, 0, j).userData.keep = 0; mplate(26, 10, 4, { r: 2, b: .6, holes: [[-6, 0, 1.6, 2.8, 1], [6, 0, 1.6, 2.8, 1]] }, 'y', M.dark, 13, 65.5, 0, j); jaws.push(j); }
 // jaws ride in T-slots: chuck top face at y=64 relative -> slots
-for (let i = 0; i < 3; i++) { const a = i / 3 * TAU; const s = box(26, 0.8, 11, M.black, 0, 64.2, 0, gChuck); s.position.set(Math.cos(a) * 28, 64.2, -Math.sin(a) * 28); s.rotation.y = a; }
+
 
 // ---------- 6. Y axes ----------
 const gY = part('yaxis', L('ציר Y – 2 עמודים, מנועי NEMA23 ו-57PX 1:6', 'Y axis – 2 columns, NEMA23 + 57PX 1:6'), L('שני עמודי פרופיל עם מסילות ליניאריות ובורגי M12 שמונעים על ידי NEMA23 (23HS22) דרך תמסורת פלנטרית 57PX יחס 1:6 – מומנט מספיק להחזקת הקורה גם ללא זרם (עם בלם). חיישני קצה E47 בכל קצה.', 'Two profile columns with linear rails and M12 screws driven by NEMA23 (23HS22) through 57PX 1:6 planetary gearboxes – enough torque to hold the beam (with brake). E47 limit switches at each end.'), [0, 0, -1], [327, 1400, -195]);
@@ -268,32 +322,34 @@ for (const s of [-1, 1]) { box(34, 50, 30, M.steel, s * 290, 0, -195, beam); box
 cyl(6, 384, M.ss, 'x', 6, 60, -155, beam, 12); box(24, 50, 40, M.alu, -192, 50, -155, beam); box(24, 50, 40, M.alu, 192, 50, -155, beam);
 jawCoupling(beam, 214, 60, -155, 9, 20).rotation.z = Math.PI / 2; const xm = nema(beam, 260, 60, -155, 'x', 56, 56, 'NEMA23', -1); box(8, 60, 60, M.alu, 228, 60, -155, beam);
 const car = grp(beam, C.PARK_X, 0, 0, 'xcar'); A(car, 'gantry');
-box(60, 34, 25, M.steel, 0, 0, -102.5, car); box(150, 265, 10, M.yellow, 0, -47.5, -85, car).scale.x = 2; // yellow plate 300x265
+box(60, 34, 25, M.steel, 0, 0, -102.5, car); mplate(300, 265, 10, { r: 22, b: 2, holes: [[-130, -112.5, 3.4, 5.8, 3], [130, -112.5, 3.4, 5.8, 3], [-130, 67.5, 3.4, 5.8, 3], [130, 67.5, 3.4, 5.8, 3], [-20, 47.5, 3.4, 5.8, 3], [20, 47.5, 3.4, 5.8, 3]], pockets: [[0, -95, 46, 110, 8, 4], [-130, -22, 18, 120, 6, 3], [130, -22, 18, 120, 6, 3]] }, 'z', M.yellow, 0, -47.5, -85, car); // cast/machined yellow plate 300x265
 box(50, 16, 50, M.brass, 0, 60, -155, car); box(50, 15, 75, M.yellow, 0, 75.5, -127.5, car); // nut + adapter
-{ const B = []; for (const x of [-130, 130]) for (const y of [-160, 20]) B.push([x, y, -80, 'z']); B.push([-20, 0, -80, 'z'], [20, 0, -80, 'z']); bolts(car, B, .9, BOLTRED); }
+{ const B = []; for (const x of [-130, 130]) for (const y of [-160, 20]) B.push([x, y, -83, 'z']); B.push([-20, 0, -83, 'z'], [20, 0, -83, 'z']); bolts(car, B, .9, BOLTRED); }
 plate(120, 30, (c, w, h) => { c.fillStyle = '#111'; c.fillRect(0, 0, w, h); c.fillStyle = '#f2c418'; c.font = `bold ${h * .5}px Arial`; c.fillText('BRAUDE DR3 · DEBURR', w * .04, h * .68); }, 0, 25, -79.4, car);
 // disc brush head
 const gDisc = new THREE.Group(); gDisc.userData.part = 'disc'; gDisc.position.set(-110, -150, 0); car.add(gDisc);
 parts.disc = { id: 'disc', name: L('ראש מברשת דיסק (קצוות חיתוך)', 'Disc brush head (cutting edges)'), desc: L('מברשת דיסק Ø120 מסיבי ניילון-SiC (Ferrois), מונעת ע"י NEMA17/BLDC 20W. עוברת לאורך קצוות החיתוך במהירות היקפית 6-15 מ/ש. בלאי מקטין את הקוטר – הבקר מגדיל סל"ד כדי לשמור על מהירות היקפית קבועה.', 'Ø120 nylon-SiC filament disc brush (Ferrois), driven by a NEMA17/20 W BLDC. Sweeps along the cutting edges at 6–15 m/s tip speed. Wear shrinks the diameter – the controller raises rpm to keep a constant surface speed.'), g: gDisc, dir: new THREE.Vector3(-1, 0, .6), anchor: new THREE.Vector3(0, 0, 40), no: partOrder.length + 1 }; partOrder.push('disc');
 nema(gDisc, 0, 0, -59, 'z', 42, 42, 'BLDC 20W', 1); jawCoupling(gDisc, 0, 0, -27, 10, 20).rotation.x = Math.PI / 2;
-box(60, 60, 4, M.yellow, 0, 0, -82, gDisc); // motor flange plate on carriage
+mplate(60, 60, 4, { r: 9, b: .8, holes: [[0, 0, 11.5], [-15.5, -15.5, 1.7, 3, 1], [15.5, -15.5, 1.7, 3, 1], [-15.5, 15.5, 1.7, 3, 1], [15.5, 15.5, 1.7, 3, 1]] }, 'z', M.yellow, 0, 0, -82, gDisc); // motor flange plate on carriage
 const discRot = grp(gDisc, 0, 0, 0, 'discRot'); A(discRot, 'gantry', 'disc', 'tool');
-cyl(4, 30, M.ss, 'z', 0, 0, -18, discRot, 12); cyl(25, 25, M.hub, 'z', 0, 0, 0, discRot, 32); cyl(10, 27, M.steel, 'z', 0, 0, 0, discRot, 16);
+cyl(4, 30, M.ss, 'z', 0, 0, -18, discRot, 12); put(csg('dhub', rlathe([[0, -12.5], [25, -12.5, 2], [25, 12.5, 2], [14, 12.5, 1.5], [12, 9, 1], [0, 9]], 96), [0, 1, 2, 3, 4, 5].map(i => [new THREE.CylinderGeometry(2, 2, 10, 16), [Math.cos(i / 6 * TAU) * 19, 12.5, Math.sin(i / 6 * TAU) * 19], null, 'sub'])).clone().rotateX(Math.PI / 2), M.hub, 0, 0, 0, discRot); cyl(10, 27, M.steel, 'z', 0, 0, 0, discRot, 16);
 const discBrG = new THREE.Group(); discRot.add(discBrG); const discBr = ring(25.5, 60, 22, M.bristle, 'z', 0, 0, 0, discBrG, 48); A(discBr, 'tool');
 // vertical (cup) brush head
 const gVert = new THREE.Group(); gVert.userData.part = 'vert'; gVert.position.set(110, 0, 0); car.add(gVert);
 parts.vert = { id: 'vert', name: L('ראש מברשת אנכית (חריצים)', 'Vertical brush head (flutes)'), desc: L('מברשת כוס אנכית Ø120 שיורדת מלמעלה לתוך החריצים והקצה. רק מברשת אחת עובדת בכל רגע – המעבר ביניהן נעשה ע"י תנועת X בלבד, ללא כלי נוסף.', 'Ø120 vertical cup brush that comes down into the flutes and the tip. Only one brush works at a time – switching between them is done by an X move only.'), g: gVert, dir: new THREE.Vector3(1, .3, .6), anchor: new THREE.Vector3(0, 100, 0), no: partOrder.length + 1 }; partOrder.push('vert');
-box(60, 10, 100, M.yellow, 0, 45, -30, gVert); box(60, 60, 10, M.yellow, 0, 15, -75, gVert); // L-arm
-cyl(18, 25, M.alu, 'y', 0, 27.5, 0, gVert, 24); // bearing housing
+put(bext(fshape([[-80, -15, 1], [-80, 50, 8], [20, 50, 8], [20, 40, 2], [-70, 40, 10], [-70, -15, 1]]), 60, 1.6).rotateY(-Math.PI / 2), M.yellow, 0, 0, 0, gVert); // cast L-arm
+put(bext(fshape([[-70, 39.5, 1], [-26, 39.5, 3], [-70, -4, 3]]), 10, 1.2).rotateY(-Math.PI / 2), M.yellow, 0, 0, 0, gVert); // rib
+for (const z of [-58, 0]) for (const x of [-18, 18]) put(zc(3.4, 1.4).rotateX(Math.PI / 2), M.dark, x, 50.6, z, gVert);
+put(rlathe([[0, 15], [18, 15, 1.5], [18, 31, 2], [22, 33, 1], [22, 40], [0, 40]], 64), M.alu, 0, 0, 0, gVert); // bearing housing with flange
 nema(gVert, 0, 71, 0, 'y', 42, 42, 'BLDC 20W', -1);
 const vertRot = grp(gVert, 0, 0, 0, 'vertRot'); A(vertRot, 'gantry', 'vert', 'tool');
-cyl(6, 230, M.ss, 'y', 0, -75, 0, vertRot, 12); cyl(60, 10, M.hub, 'y', 0, -185, 0, vertRot, 40);
+cyl(6, 230, M.ss, 'y', 0, -75, 0, vertRot, 12); put(rlathe([[0, -190], [60, -190, 1], [60, -182, 2.5], [30, -180, 6], [12, -177], [0, -177]], 128), M.hub, 0, 0, 0, vertRot);
 const vertBr = ring(14, 59, 15, M.bristle, 'y', 0, -197.5, 0, vertRot, 48); A(vertBr, 'tool');
 // bristle bundles (instanced) for realism
-function bristleBundles(parent, n, place) { const g = new THREE.CylinderGeometry(1.1, .9, 1, 5); g.translate(0, .5, 0); const im = new THREE.InstancedMesh(g, M.bristle, n); const m4 = new THREE.Matrix4(); const q = new THREE.Quaternion(); const v = new THREE.Vector3(), s = new THREE.Vector3();
-  for (let i = 0; i < n; i++) { const r = place(i, v, q, s); m4.compose(v, q, s); im.setMatrixAt(i, m4); } im.userData.inst = 1; im.castShadow = true; parent.add(im); return im; }
-const discBundles = bristleBundles(discBrG, 420, (i, v, q, s) => { const a = i / 420 * TAU * 7 % TAU, z = ((i * 7919) % 100 / 100 - .5) * 20; v.set(Math.cos(a) * 26, Math.sin(a) * 26, z); q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(Math.cos(a + (Math.random() - .5) * .08), Math.sin(a), 0).normalize()); s.set(1, 34 + Math.random() * 1.5, 1); });
-const vertBundles = bristleBundles(vertRot, 360, (i, v, q, s) => { const a = i * 2.39996, r = 16 + Math.sqrt((i + .5) / 360) * 42; v.set(Math.cos(a) * r, -190, Math.sin(a) * r); q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3((Math.random() - .5) * .06, -1, (Math.random() - .5) * .06).normalize()); s.set(1, 14 + Math.random() * 1.2, 1); });
+function bristleBundles(parent, n, place) { const g = new THREE.CylinderGeometry(.85, .7, 1, 6); g.translate(0, .5, 0); const im = new THREE.InstancedMesh(g, M.bristle, n); const m4 = new THREE.Matrix4(); const q = new THREE.Quaternion(); const v = new THREE.Vector3(), s = new THREE.Vector3();
+  const col = new THREE.Color(); for (let i = 0; i < n; i++) { const r = place(i, v, q, s); m4.compose(v, q, s); im.setMatrixAt(i, m4); const k = .75 + Math.random() * .5; im.setColorAt(i, col.setRGB(k, k, k * 1.02)); } im.userData.inst = 1; im.castShadow = true; parent.add(im); return im; }
+const discBundles = bristleBundles(discBrG, 1500, (i, v, q, s) => { const a = i / 1500 * TAU * 23 % TAU, z = ((i * 7919) % 100 / 100 - .5) * 20; v.set(Math.cos(a) * 26, Math.sin(a) * 26, z); q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(Math.cos(a + (Math.random() - .5) * .08), Math.sin(a), 0).normalize()); s.set(1, 34 + Math.random() * 1.5, 1); });
+const vertBundles = bristleBundles(vertRot, 1200, (i, v, q, s) => { const a = i * 2.39996, r = 16 + Math.sqrt((i + .5) / 1200) * 42; v.set(Math.cos(a) * r, -190, Math.sin(a) * r); q.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3((Math.random() - .5) * .06, -1, (Math.random() - .5) * .06).normalize()); s.set(1, 14 + Math.random() * 1.2, 1); });
 
 // ---------- 8. inspection camera ----------
 const gCam = part('camera', L('עמדת בדיקה: מצלמה וטבעת תאורה', 'Inspection: camera and ring light'), L('מצלמת מכונה (Machine Vision) עם טבעת LED מעל עמדת הבדיקה. מודדת את גובה הגרד לפני ואחרי – כלי עם גרד 10-20 מיקרון חוזר אוטומטית לעיבוד נוסף, מעל 20 נדחה לסל האדום. השיפור הזה מחליף בדיקה ידנית במיקרוסקופ.', 'Machine-vision camera with an LED ring light above the inspection station. Measures the burr height before and after – a tool with a 10–20 µm burr is automatically re-brushed, above 20 µm it is rejected to the red bin. Replaces manual microscope inspection.'), [0, 1, 0], [-250, 1400, 0]);
@@ -317,18 +373,18 @@ for (const y of [190, 400, 600]) box(560, 8, 10, M.ss, 0, y, -261, gCab); // DIN
 for (const y of [150, 290, 500, 650]) box(580, 40, 40, M.grey, 0, y, -246, gCab); // wire ducts
 const plc = box(130, 90, 70, M.plcLight, -200, 400, -231, gCab); box(130, 14, 72, M.dark, -200, 360, -231, gCab);
 plate(120, 70, (c, w, h) => { c.fillStyle = '#e8e8e4'; c.fillRect(0, 0, w, h); c.fillStyle = '#1a3d7a'; c.font = `bold ${h * .2}px Arial`; c.fillText('OMRON', w * .05, h * .22); c.fillStyle = '#222'; c.font = `${h * .14}px Arial`; c.fillText('SYSMAC CP2E-N30', w * .05, h * .4); for (let i = 0; i < 12; i++) { c.fillStyle = i % 3 ? '#2a2' : '#dd0'; c.fillRect(w * .06 + i * w * .07, h * .6, w * .04, h * .06); } }, -200, 400, -195.6, gCab);
-for (let i = 0; i < 6; i++) { box(40, 110, 80, M.black, -60 + i * 50, 600, -226, gCab); box(30, 20, 4, M.green, -60 + i * 50, 640, -184, gCab); }
+for (let i = 0; i < 6; i++) { mblock('drv', 40, 110, 80, 4, [0, 1, 2, 3, 4, 5].map(k => [new THREE.BoxGeometry(46, 6, 4), [0, -40 + k * 13, 40], null, 'sub']), M.black, -60 + i * 50, 600, -226, gCab); box(30, 20, 4, M.green, -60 + i * 50, 640, -184, gCab); }
 plate(290, 16, (c, w, h) => { c.fillStyle = '#111'; c.fillRect(0, 0, w, h); c.fillStyle = '#fff'; c.font = `${h * .7}px Arial`; c.fillText('DM542  Z · X · Y1 · Y2 · DISC · VERT', 4, h * .78); }, 65, 560, -185.5, gCab);
 box(120, 90, 90, M.alu, 180, 400, -221, gCab); for (let i = 0; i < 8; i++) box(2, 80, 92, M.dark, 130 + i * 14, 400, -221, gCab);
 for (let i = 0; i < 8; i++) box(18, 70, 60, i < 2 ? M.yellow : M.plcLight, 20 + i * 20, 400, -236, gCab);
 box(50, 80, 70, M.red, 280, 190, -231, gCab); box(46, 76, 60, M.grey, 230, 190, -236, gCab);
 for (let i = 0; i < 26; i++) box(6, 40, 46, i % 5 === 4 ? M.blue : M.grey, -260 + i * 8, 190, -243, gCab);
 // FRL unit on left outside
-box(40, 60, 50, M.blue, -405, 520, 160, gCab); cyl(14, 50, M.glassC, 'y', -405, 460, 160, gCab, 20).userData.glass = 1; cyl(18, 16, M.black, 'y', -405, 560, 160, gCab); cyl(14, 10, M.plcLight, 'z', -405, 520, 190, gCab);
+mblock('frl', 40, 60, 50, 7, [], M.blue, -405, 520, 160, gCab); cyl(14, 50, M.glassC, 'y', -405, 460, 160, gCab, 20).userData.glass = 1; cyl(18, 16, M.black, 'y', -405, 560, 160, gCab); cyl(14, 10, M.plcLight, 'z', -405, 520, 190, gCab);
 box(6, 120, 60, M.alu, -390, 520, 160, gCab);
 tube([[-405, 580, 160], [-405, 640, 100], [-403, 662, -20], [-402, 676, -120], [-402, 712, -150]], 4, M.hose, gCab);
 // main switch on the right side outside
-box(70, 70, 40, M.plcLight, 422, 400, -150, gCab); box(4, 64, 64, M.yellow, 459, 400, -150, gCab); box(10, 50, 20, M.red, 466, 400, -150, gCab);
+mblock('msw', 70, 70, 40, 8, [], M.plcLight, 422, 400, -150, gCab); mplate(64, 64, 4, { r: 10, b: 1 }, 'x', M.yellow, 459, 400, -150, gCab); put(bext(fshape([[-10, -25, 4], [10, -25, 4], [10, 25, 4], [-10, 25, 4]]), 10, 2).rotateY(Math.PI / 2), M.red, 466, 400, -150, gCab);
 // cables from cabinet up to the axis motors (through grommets in the table)
 for (const [x, z, c] of [[-150, -230, M.cable], [-130, -230, M.cableO], [200, -230, M.cable], [220, -230, M.cableO]]) { const t = tube([[x, 300, z], [x, 600, z], [x + 10, 700, z + 5]], 4, c, gCab); }
 
@@ -350,20 +406,26 @@ cyl(90, 740, M.dark, 'y', RB.base.x, 380, RB.base.z, gRob, 32); cyl(130, 14, M.d
 { const B = []; for (let i = 0; i < 8; i++) { const a = i / 8 * TAU; B.push([RB.base.x + Math.cos(a) * 105, 760, RB.base.z + Math.sin(a) * 105]); B.push([RB.base.x + Math.cos(a) * 115, 14, RB.base.z + Math.sin(a) * 115]); } bolts(gRob, B, .9); }
 plate(120, 50, (c, w, h) => { c.fillStyle = '#2a2e34'; c.fillRect(0, 0, w, h); c.fillStyle = '#fff'; c.font = `bold ${h * .38}px Arial`; c.fillText('UR12e', w * .08, h * .5); c.font = `${h * .22}px Arial`; c.fillText('cobot · 12 kg · 1300 mm', w * .08, h * .82); }, RB.base.x, 500, RB.base.z + 90.6, gRob);
 const R = {}; R.yaw = grp(gRob, RB.base.x, RB.base.y, RB.base.z, 'rbase'); A(R.yaw, 'robot');
-cyl(78, 90, M.robot, 'y', 0, 45, 0, R.yaw, 40); cyl(80, 12, M.robotJ, 'y', 0, 96, 0, R.yaw, 40); cyl(62, 70, M.robot, 'y', 0, 137, 0, R.yaw, 32);
-cyl(72, 170, M.robot, 'z', 0, RB.SH, 0, R.yaw, 40); cyl(74, 10, M.robotJ, 'z', 0, RB.SH, 82, R.yaw, 40);
+rcyl(78, 90, 16, M.robot, 'y', 0, 45, 0, R.yaw); rcyl(80, 12, 4, M.robotJ, 'y', 0, 96, 0, R.yaw); put(rlathe([[0, 102], [64, 102, 3], [58, 128, 30], [56, 172], [0, 172]], 96), M.robot, 0, 0, 0, R.yaw);
+rcyl(72, 170, 26, M.robot, 'z', 0, RB.SH, 0, R.yaw); capJ(74, 10, 'z', 0, RB.SH, 82, R.yaw); capJ(66, 6, 'z', 0, RB.SH, -82, R.yaw, 1);
 R.up = grp(R.yaw, 0, RB.SH, 0, 'rup'); A(R.up, 'robot');
-cyl(50, RB.L1 - 120, M.robot, 'x', RB.L1 / 2, 0, -110, R.up, 32); cyl(62, 80, M.robot, 'z', 0, 0, -120, R.up, 32); cyl(56, 60, M.robot, 'z', RB.L1, 0, -112, R.up, 32);
+cyl(50, RB.L1 - 120, M.robot, 'x', RB.L1 / 2, 0, -110, R.up, 96, 43); rcyl(62, 80, 20, M.robot, 'z', 0, 0, -120, R.up); rcyl(56, 60, 18, M.robot, 'z', RB.L1, 0, -112, R.up); capJ(58, 6, 'z', 0, 0, -157, R.up, 1); capJ(52, 6, 'z', RB.L1, 0, -139, R.up, 1);
+put(rlathe([[0, 0], [58, 0], [50, 34, 22], [50, 40], [0, 40]], 96).rotateZ(-Math.PI / 2), M.robot, 50, 0, -110, R.up); put(rlathe([[0, 0], [52, 0], [43, 30, 18], [43, 36], [0, 36]], 96).rotateZ(Math.PI / 2), M.robot, RB.L1 - 50, 0, -110, R.up);
 R.el = grp(R.up, RB.L1, 0, 0, 'rel'); A(R.el, 'robot');
-cyl(58, 120, M.robot, 'z', 0, 0, -20, R.el, 32); cyl(60, 8, M.robotJ, 'z', 0, 0, 43, R.el, 32); cyl(40, RB.L2 - 110, M.robot, 'x', RB.L2 / 2 - 10, 0, -20, R.el, 28);
+rcyl(58, 120, 22, M.robot, 'z', 0, 0, -20, R.el); capJ(60, 8, 'z', 0, 0, 43, R.el); cyl(40, RB.L2 - 110, M.robot, 'x', RB.L2 / 2 - 10, 0, -20, R.el, 96, 34);
+put(rlathe([[0, 0], [50, 0], [40, 30, 18], [40, 36], [0, 36]], 96).rotateZ(-Math.PI / 2), M.robot, 45, 0, -20, R.el);
 R.wr = grp(R.el, RB.L2, 0, 0, 'rwr'); A(R.wr, 'robot');
-cyl(44, 100, M.robot, 'z', 0, 0, -20, R.wr, 28); cyl(46, 8, M.robotJ, 'z', 0, 0, 34, R.wr, 28); cyl(40, 64, M.robot, 'y', 0, -66, 0, R.wr, 28); cyl(41, 8, M.robotJ, 'y', 0, -96, 0, R.wr, 28);
+rcyl(44, 100, 17, M.robot, 'z', 0, 0, -20, R.wr); capJ(46, 8, 'z', 0, 0, 34, R.wr); rcyl(40, 64, 14, M.robot, 'y', 0, -66, 0, R.wr); rcyl(41, 8, 2.5, M.robotJ, 'y', 0, -96, 0, R.wr);
 // wrist-3 rotates about vertical → gripper
 R.g = grp(R.wr, 0, -100, 0, 'rgrip'); A(R.g, 'robot', 'tool');
-cyl(32, 10, M.alu, 'y', 0, -5, 0, R.g, 28); box(70, 65, 90, M.dark, 0, -42.5, 0, R.g); box(72, 10, 92, M.alu, 0, -15, 0, R.g);
+rcyl(32, 10, 2, M.alu, 'y', 0, -5, 0, R.g); mplate(72, 92, 10, { r: 14, b: 2, holes: [[-27, -37, 2.6, 4.4, 2.5], [27, -37, 2.6, 4.4, 2.5], [-27, 37, 2.6, 4.4, 2.5], [27, 37, 2.6, 4.4, 2.5]] }, '-y', M.alu, 0, -15, 0, R.g);
+mblock('grip', 70, 55, 90, 12, [...[-1, 1].flatMap(s => [[zc(4.4, 8).rotateY(Math.PI / 2), [s * 35, -8, 26], null, 'sub'], [zc(4.4, 8).rotateY(Math.PI / 2), [s * 35, -8, -26], null, 'sub'], [new RoundedBoxGeometry(6, 22, 50, 2, 2), [s * 35, 8, 0], null, 'sub']]), [new RoundedBoxGeometry(46, 16, 96, 2, 2), [0, -27, 0], null, 'sub']], M.dark, 0, -47.5, 0, R.g);
+box(40, 5, 86, M.alu, 0, -72.4, 0, R.g); for (const s of [-1, 1]) mplate(16, 14, 4, { r: 3, b: .8, holes: [[0, 0, 2, 3.4, 1]] }, 'x', M.ss, s * 33, -8, s * 26, R.g);
 plate(60, 20, (c, w, h) => { c.fillStyle = '#222'; c.fillRect(0, 0, w, h); c.fillStyle = '#4af'; c.font = `bold ${h * .6}px Arial`; c.fillText('2F-85 grip', 4, h * .75); }, 0, -45, 45.6, R.g);
 box(16, 10, 10, M.blue, 30, -60, 46, R.g);
-R.f = []; for (const s of [-1, 1]) { const f = grp(R.g, 0, -75, s * 20, 'finger'); A(f, 'robot', 'tool'); box(20, 110, 10, M.alu, 0, -55, s * 0, f); box(20, 30, 3, M.rubber, 0, -95, -s * 6.5, f); f.userData.s = s; R.f.push(f); }
+R.f = []; for (const s of [-1, 1]) { const f = grp(R.g, 0, -75, s * 20, 'finger'); A(f, 'robot', 'tool'); put(bext(fshape([[-5, 0, 3], [5, 0, 3], [5, -60, 20], [2.5, -104, 2], [0, -110, 2], [-5, -110, 1]]), 20, 1.2).rotateY(Math.PI / 2).scale(1, 1, -s), M.alu, 0, 0, 0, f);
+  { const T = [[-5, -80]]; for (let k = 0; k < 6; k++) T.push([-8, -82.5 - k * 5], [-5.6, -85 - k * 5]); T.push([-5, -110]); put(bext(fshape(T), 18, .4).rotateY(Math.PI / 2).scale(1, 1, -s), M.dark, 0, 0, 0, f); }
+  put(zc(3.2, 12).rotateY(Math.PI / 2), M.ss, 0, -14, 0, f); f.userData.s = s; R.f.push(f); }
 tube([[-30, 0, -60], [-120, -30, -90], [-260, 10, -70]], 5, M.cable, R.wr).userData.allow = ['robot'];
 
 // ---------- 13. trays + reject bin ----------
@@ -446,7 +508,7 @@ function walk(root, fn) { const rec = o => { fn(o); for (const c of o.children.s
 const SKIPMERGE = new Set(['tool', 'stock', 'chains']);
 { const ecache = new Map(); const edgeOf = g => { let e = ecache.get(g.uuid); if (!e) { e = new THREE.EdgesGeometry(g, 32); ecache.set(g.uuid, e); } return e; };
   const mkey = m => [m.uuid].join('|');
-  const canEdge = o => !(o.isInstancedMesh || o.userData.glass || o.geometry.type === 'TubeGeometry' || o.geometry.type === 'PlaneGeometry' || o.geometry.attributes.position.count > 20000 || o.material === M.bristle);
+  const canEdge = o => !(o.geometry.userData.noEdge || o.geometry.type === 'ExtrudeGeometry' || o.isInstancedMesh || o.userData.glass || o.geometry.type === 'TubeGeometry' || o.geometry.type === 'PlaneGeometry' || o.geometry.attributes.position.count > 20000 || o.material === M.bristle);
   const norm = (g, M4) => { let c = g.index ? g.toNonIndexed() : g.clone(); for (const k of Object.keys(c.attributes)) if (!['position', 'normal', 'uv'].includes(k)) c.deleteAttribute(k);
     if (!c.attributes.uv) c.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(c.attributes.position.count * 2), 2)); if (!c.attributes.normal) c.computeVertexNormals(); c.morphAttributes = {}; c.clearGroups(); return c.applyMatrix4(M4); };
   const anchorOf = (o, root) => { for (let q = o.parent; q; q = q.parent) { if (q === root || q.userData.body) return q; } return root; };
