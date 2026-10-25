@@ -34,8 +34,8 @@ renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadow
 renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.0; if (QS.get('tm') === 'agx') renderer.toneMapping = THREE.AgXToneMapping; renderer.localClippingEnabled = true;
 const scene = new THREE.Scene();
 // Fusion-360-like studio backdrop: light grey (default) or dark graphite
-let BG = (() => { const q = QS.get('bg'); if (q === 'dark' || q === 'light') { localStorage.setItem('dbc_bg', q); return q; } return localStorage.getItem('dbc_bg') || 'light'; })();
-const THEMES = { light: { top: '#f4f5f7', bot: '#c3c7cd', fog: 0xd2d5da, base: '#d9dbdf', minor: '#c6c9ce', major: '#a9aeb5' }, dark: { top: '#3a3e45', bot: '#121418', fog: 0x1d2025, base: '#2b2e34', minor: '#353940', major: '#4a4f58' } };
+let BG = (() => { const q = QS.get('bg'); if (q === 'dark' || q === 'light') { localStorage.setItem('dbc_bg', q); return q; } return localStorage.getItem('dbc_bg') || 'dark'; })();
+const THEMES = { light: { top: '#f4f5f7', bot: '#c3c7cd', fog: 0xd2d5da, base: '#d9dbdf', minor: '#c6c9ce', major: '#a9aeb5' }, dark: { top: '#30343a', bot: '#0a0b0d', fog: 0x16181b, base: '#1e2024', minor: '#282b30', major: '#3a3e45' } };
 function bgTex(T) { const c = document.createElement('canvas'); c.width = 4; c.height = 512; const x = c.getContext('2d'); const g = x.createLinearGradient(0, 0, 0, 512); g.addColorStop(0, T.top); g.addColorStop(1, T.bot); x.fillStyle = g; x.fillRect(0, 0, 4, 512); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; }
 scene.fog = new THREE.Fog(0xd2d5da, 6000, 14000);
 const pmrem = new THREE.PMREMGenerator(renderer); scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
@@ -66,7 +66,8 @@ function gridTex(T) { const c = document.createElement('canvas'); c.width = c.he
   const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(16, 16); t.anisotropy = 16; t.colorSpace = THREE.SRGBColorSpace; return t; }
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(16000, 16000), new THREE.MeshStandardMaterial({ roughness: .75, metalness: 0, envMapIntensity: .35 }));
 floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
-function applyTheme(b) { BG = b; const T = THEMES[b]; if (scene.background && scene.background.dispose) scene.background.dispose(); scene.background = bgTex(T); scene.fog.color.set(T.fog); if (floor.material.map) floor.material.map.dispose(); floor.material.map = gridTex(T); floor.material.needsUpdate = true; document.body.classList.toggle('bglight', b === 'light'); }
+const rim = new THREE.DirectionalLight(0xcfe0ff, 0); rim.position.set(1600, 1400, -2200); scene.add(rim);
+function applyTheme(b) { BG = b; const T = THEMES[b]; const dk = b === 'dark'; renderer.toneMappingExposure = dk ? 1.15 : 1.0; hemi.intensity = dk ? .55 : .35; fill.intensity = dk ? .75 : .45; rim.intensity = dk ? 1.1 : 0; if (scene.background && scene.background.dispose) scene.background.dispose(); scene.background = bgTex(T); scene.fog.color.set(T.fog); if (floor.material.map) floor.material.map.dispose(); floor.material.map = gridTex(T); floor.material.needsUpdate = true; document.body.classList.toggle('bglight', b === 'light'); }
 applyTheme(BG);
 // yellow safety lines around robot zone
 for (const [w, d, x, z] of [[1100, 30, -800, 820], [30, 1400, -1370, 120], [1100, 30, -800, -580]]) { const s = new THREE.Mesh(new THREE.PlaneGeometry(w, d), new THREE.MeshStandardMaterial({ color: 0xf2c11d, roughness: .7 })); s.rotation.x = -Math.PI / 2; s.position.set(x, 1.5, z); scene.add(s); }
